@@ -102,6 +102,8 @@ my %palette_map;                # palette map hash
 my $pal_file = "palette.map";   # palette map file name
 my $stackreverse = 0;           # reverse stack order, switching merge end
 my $inverted = 0;               # icicle graph
+my $splittid = 0;			# output one flamegraph per thread
+				# (the events are sorted chronologically)
 my $negate = 0;                 # switch differential hues
 my $titletext = "";             # centered heading
 my $titledefault = "Flame Graph";	# overwritten by --title
@@ -127,6 +129,8 @@ USAGE: $0 [options] infile > outfile.svg\n
 	--cp          # use consistent palette (palette.map)
 	--reverse     # generate stack-reversed flame graph
 	--inverted    # icicle graph
+	--tid	      # output one flamegraph per thread
+		      # (the events are sorted chronologically)
 	--negate      # switch differential hues (blue<->red)
 	--help        # this message
 
@@ -153,6 +157,7 @@ GetOptions(
 	'hash'        => \$hash,
 	'cp'          => \$palette,
 	'reverse'     => \$stackreverse,
+	'tid'	      => \$splittid,
 	'inverted'    => \$inverted,
 	'negate'      => \$negate,
 	'help'        => \$help,
@@ -164,7 +169,7 @@ my $ypad1 = $fontsize * 4;      # pad top, include title
 my $ypad2 = $fontsize * 2 + 10; # pad bottom, include labels
 my $xpad = 10;                  # pad lefm and right
 my $framepad = 1;		# vertical padding for frames
-my $depthmax = 0;
+my @depths;
 my %Events;
 my %nameattr;
 
@@ -478,29 +483,32 @@ sub read_palette {
 
 my %Node;	# Hash of merged frame data
 my %Tmp;
+my %Tids;
 
 # flow() merges two stacks, storing the merged frames and value data in %Node.
 sub flow {
-	my ($last, $this, $v, $d) = @_;
+	my ($last_tid, $last, $this_tid, $this, $v, $d) = @_;
 
 	my $len_a = @$last - 1;
 	my $len_b = @$this - 1;
 
 	my $i = 0;
 	my $len_same;
-	for (; $i <= $len_a; $i++) {
-		last if $i > $len_b;
-		last if $last->[$i] ne $this->[$i];
+	if ($last_tid == $this_tid) {
+		for (; $i <= $len_a; $i++) {
+			last if $i > $len_b;
+			last if $last->[$i] ne $this->[$i];
+		}
 	}
 	$len_same = $i;
 
 	for ($i = $len_a; $i >= $len_same; $i--) {
 		my $k = "$last->[$i];$i";
-		# a unique ID is constructed from "func;depth;etime";
+		# a unique ID is constructed from "tid;func;depth;etime";
 		# func-depth isn't unique, it may be repeated later.
-		$Node{"$k;$v"}->{stime} = delete $Tmp{$k}->{stime};
+		$Node{"$last_tid;$k;$v"}->{stime} = delete $Tmp{$k}->{stime};
 		if (defined $Tmp{$k}->{delta}) {
-			$Node{"$k;$v"}->{delta} = delete $Tmp{$k}->{delta};
+			$Node{"$last_tid;$k;$v"}->{delta} = delete $Tmp{$k}->{delta};
 		}
 		delete $Tmp{$k};
 	}
@@ -513,12 +521,12 @@ sub flow {
 		}
 	}
 
-        return $this;
+        return ($this_tid, $this);
 }
 
 # parse input
 my @Data;
-my $last = [];
+my ($last_tid, $last) = (0, []);
 my $time = 0;
 my $delta = undef;
 my $ignored = 0;
@@ -546,6 +554,9 @@ foreach (<>) {
 	}
 }
 
+my $tid_idx = 0;
+my $tid = 0;
+
 # process and merge frames
 foreach (sort @Data) {
 	chomp;
@@ -572,6 +583,23 @@ foreach (sort @Data) {
 	# clean up SVG breaking characters:
 	$stack =~ tr/<>/()/;
 
+	# Grab the tid if the option --tid was provided
+	if ($splittid) {
+		my $stack2;
+		($stack, $tid, $stack2) =
+			$stack =~ (/^([^-]*)-?(?:[^\/]*)\/?([^; ]*)(.*)$/);
+		$stack .= $stack2;
+		if ($tid eq "") {
+			print STDERR "Missing TID in: $stack\n";
+			$ignored++;
+			next;
+		}
+		unless (exists $Tids{$tid}) {
+			$Tids{$tid} = $tid_idx;
+			$tid_idx++;
+		}
+	}
+
 	# for chain graphs, annotate waker frames with "_[w]", for later
 	# coloring. This is a hack, but has a precedent ("_[k]" from perf).
 	if ($colors eq "chain") {
@@ -588,7 +616,7 @@ foreach (sort @Data) {
 	}
 
 	# merge frames and populate %Node:
-	$last = flow($last, [ '', split ";", $stack ], $time, $delta);
+	($last_tid, $last) = flow($last_tid, $last, $tid, [ '', split ";", $stack ], $time, $delta);
 
 	if (defined $samples2) {
 		$time += $samples2;
@@ -596,7 +624,7 @@ foreach (sort @Data) {
 		$time += $samples;
 	}
 }
-flow($last, [], $time, $delta);
+flow($last_tid, $last, 0, [], $time, $delta);
 
 warn "Ignored $ignored lines with invalid format\n" if $ignored;
 unless ($time) {
@@ -623,7 +651,12 @@ my $minwidth_time = $minwidth / $widthpertime;
 
 # prune blocks that are too narrow and determine max depth
 while (my ($id, $node) = each %Node) {
-	my ($func, $depth, $etime) = split ";", $id;
+	my ($tid, $func, $depth, $etime) = split ";", $id;
+	unless (exists $Tids{$tid}) {
+		$Tids{$tid} = $tid_idx;
+		$tid_idx++;
+	}
+	$tid = $Tids{$tid};
 	my $stime = $node->{stime};
 	die "missing start for $id" if not defined $stime;
 
@@ -631,11 +664,23 @@ while (my ($id, $node) = each %Node) {
 		delete $Node{$id};
 		next;
 	}
-	$depthmax = $depth if $depth > $depthmax;
+	unless (exists $depths[$tid]) {
+		$depths[$tid] = 0;
+	}
+	$depths[$tid] = $depth if $depth > $depths[$tid];
 }
 
 # draw canvas, and embed interactive JavaScript program
-my $imageheight = ($depthmax * $frameheight) + $ypad1 + $ypad2;
+my $imageheight = 0;
+for (my $i = 0; $i < scalar @depths; $i++) {
+	unless (exists $depths[$i]) {
+		$depths[$i] = 0;
+	}
+	$imageheight += $depths[$i];
+}
+$imageheight *= $frameheight;
+$imageheight += ($ypad1 + $ypad2) * scalar @depths;
+
 my $im = SVG->new();
 $im->header($imagewidth, $imageheight);
 my $inc = <<INC;
@@ -976,7 +1021,14 @@ my ($white, $black, $vvdgrey, $vdgrey) = (
 	$im->colorAllocate(40, 40, 40),
 	$im->colorAllocate(160, 160, 160),
     );
-$im->stringTTF($black, $fonttype, $fontsize + 5, 0.0, int($imagewidth / 2), $fontsize * 2, $titletext, "middle");
+
+# Print every title
+my $titleoffset = $fontsize * 2;
+my %Revtids = reverse %Tids;
+for (my $i = 0; $i < scalar @depths; $i++) {
+	$im->stringTTF($black, $fonttype, $fontsize + 5, 0.0, int($imagewidth / 2), $titleoffset, $titletext . '-' . $Revtids{$i}, "middle");
+	$titleoffset += $depths[$i] * $frameheight + $ypad1 + $ypad2;
+}
 $im->stringTTF($black, $fonttype, $fontsize, 0.0, $xpad, $imageheight - ($ypad2 / 2), " ", "", 'id="details"');
 $im->stringTTF($black, $fonttype, $fontsize, 0.0, $xpad, $fontsize * 2,
     "Reset Zoom", "", 'id="unzoom" onclick="unzoom()" style="opacity:0.0;cursor:pointer"');
@@ -990,7 +1042,9 @@ if ($palette) {
 
 # draw frames
 while (my ($id, $node) = each %Node) {
-	my ($func, $depth, $etime) = split ";", $id;
+	my ($tid, $func, $depth, $etime) = split ";", $id;
+	$tid = $Tids{$tid};
+
 	my $stime = $node->{stime};
 	my $delta = $node->{delta};
 
@@ -1000,11 +1054,15 @@ while (my ($id, $node) = each %Node) {
 	my $x2 = $xpad + $etime * $widthpertime;
 	my ($y1, $y2);
 	unless ($inverted) {
-		$y1 = $imageheight - $ypad2 - ($depth + 1) * $frameheight + $framepad;
-		$y2 = $imageheight - $ypad2 - $depth * $frameheight;
+		$y1 = $ypad1 + ($depths[$tid] - $depth - 1) * $frameheight + $framepad;
+		$y2 = $y1 + $frameheight - $framepad;
 	} else {
 		$y1 = $ypad1 + $depth * $frameheight;
 		$y2 = $ypad1 + ($depth + 1) * $frameheight - $framepad;
+	}
+	for (my $i = 0; $i < $tid; $i++) {
+		$y1 += $depths[$i] * $frameheight + $ypad1 + $ypad2;
+		$y2 += $depths[$i] * $frameheight + $ypad1 + $ypad2;
 	}
 
 	my $samples = sprintf "%.0f", ($etime - $stime) * $factor;
@@ -1014,6 +1072,9 @@ while (my ($id, $node) = each %Node) {
 	my $info;
 	if ($func eq "" and $depth == 0) {
 		$info = "all ($samples_txt $countname, 100%)";
+		if ($splittid) {
+			$x1 = $xpad;
+		}
 	} else {
 		my $pct = sprintf "%.2f", ((100 * $samples) / ($timemax * $factor));
 		my $escaped_func = $func;
