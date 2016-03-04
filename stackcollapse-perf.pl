@@ -69,16 +69,17 @@ use Getopt::Long;
 my %collapsed;
 
 sub remember_stack {
-	my ($stack, $count) = @_;
-	$collapsed{$stack} += $count;
+	my ($stack, $count, $timestamp) = @_;
+	$collapsed{"$timestamp;$stack"} += $count;
 }
 my $annotate_kernel = 0; # put an annotation on kernel function
 my $include_pname = 1;	# include process names in stacks
 my $include_pid = 0;	# include process ID with process name
 my $include_tid = 0;	# include process & thread ID with process name
-my $tidy_java = 1;	# condense Java signatures
+my $chrono = 0;     	# only sort and merge chronologically
+my $tidy_java = 1;	    # condense Java signatures
 my $tidy_generic = 1;	# clean up function names a little
-my $target_pname;	# target process name from perf invocation
+my $target_pname;   	# target process name from perf invocation
 
 my $show_inline = 0;
 my $show_context = 0;
@@ -86,7 +87,8 @@ GetOptions('inline' => \$show_inline,
            'context' => \$show_context,
            'pid' => \$include_pid,
            'kernel' => \$annotate_kernel,
-           'tid' => \$include_tid)
+           'tid' => \$include_tid,
+           'chrono' => \$chrono)
 or die <<USAGE_END;
 USAGE: $0 [options] infile > outfile\n
 	--pid		# include PID with process names [1]
@@ -132,6 +134,7 @@ sub inline {
 }
 
 my @stack;
+my $timestamp = 0;
 my $pname;
 
 #
@@ -165,14 +168,15 @@ while (defined($_ = <>)) {
 				unshift @stack, "";
 			}
 		}
-		remember_stack(join(";", @stack), 1) if @stack;
+		remember_stack(join(";", @stack), 1, $timestamp) if @stack;
 		undef @stack;
 		undef $pname;
 		next;
 	}
 
+
 	# event record start
-	if (/^(\S+\s*?\S*?)\s+(\d+)\s/) {
+	if (/^(\S+(?:\s*\S*)*?)\s+(\d+)\s(.*)/) {
 		# default "perf script" output has TID but not PID
 		# eg, "java 25607 4794564.109216: cycles:"
 		# eg, "java 12688 [002] 6544038.708352: cpu-clock:"
@@ -185,8 +189,11 @@ while (defined($_ = <>)) {
 		} else {
 			$pname = $1;
 		}
+        if ($chrono) {
+            ($timestamp) = $3 =~ /^\s*(?:\[\d+\])?\s*(\d+(?:\.\d+))/;
+        }
 		$pname =~ tr/ /_/;
-	} elsif (/^(\S+\s*?\S*?)\s+(\d+)\/(\d+)/) {
+	} elsif (/^(\S+\s*?\S*?)\s+(\d+)\/(\d+)(.*)/) {
 		# eg, "java 24636/25607 [000] 4794564.109216: cycles:"
 		# eg, "java 12688/12764 6544038.708352: cpu-clock:"
 		# eg, "V8 WorkerThread 24636/25607 [000] 94564.109216: cycles:"
@@ -198,6 +205,9 @@ while (defined($_ = <>)) {
 		} else {
 			$pname = $1;
 		}
+        if ($chrono) {
+            ($timestamp) = $4 =~ /^\s*(?:\[\d+\])?\s*(\d+(?:\.\d+))/;
+        }
 		$pname =~ tr/ /_/;
 
 	# stack line
@@ -226,7 +236,7 @@ while (defined($_ = <>)) {
 			# fall through to $tidy_java
 		}
 
-		if ($tidy_java and $pname eq "java") {
+		if ($tidy_java and defined $pname and $pname eq "java") {
 			# along with $tidy_generic, converts the following:
 			#	Lorg/mozilla/javascript/ContextFactory;.call(Lorg/mozilla/javascript/ContextAction;)Ljava/lang/Object;
 			#	Lorg/mozilla/javascript/ContextFactory;.call(Lorg/mozilla/javascript/C
@@ -244,6 +254,7 @@ while (defined($_ = <>)) {
 	}
 }
 
-foreach my $k (sort { $a cmp $b } keys %collapsed) {
-	print "$k $collapsed{$k}\n";
+foreach my $key (sort { $a cmp $b } keys %collapsed) {
+    my ($timestamp, $stack) = split(";", $key);
+	print "$stack $collapsed{$key}\n";
 }
