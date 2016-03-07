@@ -255,6 +255,6 @@ while (defined($_ = <>)) {
 }
 
 foreach my $key (sort { $a cmp $b } keys %collapsed) {
-    my ($timestamp, $stack) = split(";", $key);
+    my ($timestamp, $stack) = split(";", $key, 2);
 	print "$stack $collapsed{$key}\n";
 }
