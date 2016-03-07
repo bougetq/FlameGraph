@@ -95,7 +95,8 @@ USAGE: $0 [options] infile > outfile\n
 	--tid		# include TID and PID with process names [1]
 	--inline	# un-inline using addr2line
 	--kernel	# annotate kernel functions with a _[k]
-	--context	# include source context from addr2line\n
+	--context	# include source context from addr2line
+	--chrono	# output the stacks in chronological order\n
 [1] perf script must emit both PID and TIDs for these to work; eg:
 	perf script -f comm,pid,tid,cpu,time,event,ip,sym,dso,trace
 USAGE_END
