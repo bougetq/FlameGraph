@@ -102,8 +102,9 @@ my %palette_map;                # palette map hash
 my $pal_file = "palette.map";   # palette map file name
 my $stackreverse = 0;           # reverse stack order, switching merge end
 my $inverted = 0;               # icicle graph
-my $splittid = 0;			# output one flamegraph per thread
+my $splittid = 0;               # output one flamegraph per thread
 				# (the events are sorted chronologically)
+my $sort = 0;                   # Don't sort the output
 my $negate = 0;                 # switch differential hues
 my $titletext = "";             # centered heading
 my $titledefault = "Flame Graph";	# overwritten by --title
@@ -129,8 +130,8 @@ USAGE: $0 [options] infile > outfile.svg\n
 	--cp          # use consistent palette (palette.map)
 	--reverse     # generate stack-reversed flame graph
 	--inverted    # icicle graph
-	--tid	      # output one flamegraph per thread
-		      # (the events are sorted chronologically)
+	--tid         # output one flamegraph per thread
+	--sort        # sorts output alphabetically
 	--negate      # switch differential hues (blue<->red)
 	--help        # this message
 
@@ -158,6 +159,7 @@ GetOptions(
 	'cp'          => \$palette,
 	'reverse'     => \$stackreverse,
 	'tid'	      => \$splittid,
+	'sort'        => \$sort,
 	'inverted'    => \$inverted,
 	'negate'      => \$negate,
 	'help'        => \$help,
@@ -558,7 +560,11 @@ my $tid_idx = 0;
 my $tid = 0;
 
 # process and merge frames
-foreach (sort @Data) {
+
+if ($sort) {
+	@Data = sort @Data;
+}
+foreach (@Data) {
 	chomp;
 	# process: folded_stack count
 	# eg: func_a;func_b;func_c 31
