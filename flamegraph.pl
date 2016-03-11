@@ -486,54 +486,96 @@ sub read_palette {
 my %Node;	# Hash of merged frame data
 my %Tmp;
 my %Tids;
+unless ($splittid) {
+	$Tids{0} = 0;
+}
 
 # flow() merges two stacks, storing the merged frames and value data in %Node.
 sub flow {
-	my ($last_tid, $last, $this_tid, $this, $v, $d) = @_;
+	my ($tid, $last, $this, $v, $d) = @_;
 
 	my $len_a = @$last - 1;
 	my $len_b = @$this - 1;
 
 	my $i = 0;
 	my $len_same;
-	if ($last_tid == $this_tid) {
-		for (; $i <= $len_a; $i++) {
-			last if $i > $len_b;
-			last if $last->[$i] ne $this->[$i];
-		}
+	for (; $i <= $len_a; $i++) {
+		last if $i > $len_b;
+		last if $last->[$i] ne $this->[$i];
 	}
 	$len_same = $i;
 
 	for ($i = $len_a; $i >= $len_same; $i--) {
-		my $k = "$last->[$i];$i";
+		my $k = "$tid;$last->[$i];$i";
 		# a unique ID is constructed from "tid;func;depth;etime";
 		# func-depth isn't unique, it may be repeated later.
-		$Node{"$last_tid;$k;$v"}->{stime} = delete $Tmp{$k}->{stime};
+		$Node{"$k;$v"}->{stime} = delete $Tmp{$k}->{stime};
 		if (defined $Tmp{$k}->{delta}) {
-			$Node{"$last_tid;$k;$v"}->{delta} = delete $Tmp{$k}->{delta};
+			$Node{"$k;$v"}->{delta} = delete $Tmp{$k}->{delta};
 		}
 		delete $Tmp{$k};
 	}
 
 	for ($i = $len_same; $i <= $len_b; $i++) {
-		my $k = "$this->[$i];$i";
+		my $k = "$tid;$this->[$i];$i";
 		$Tmp{$k}->{stime} = $v;
 		if (defined $d) {
 			$Tmp{$k}->{delta} += $i == $len_b ? $d : 0;
 		}
 	}
-
-        return ($this_tid, $this);
 }
 
 # parse input
 my @Data;
-my ($last_tid, $last) = (0, []);
 my $time = 0;
 my $delta = undef;
 my $ignored = 0;
 my $line;
 my $maxdelta = 1;
+
+my $tid_idx = 0;
+my $last_stack = [];
+my %Lasts;
+
+sub wrap_flow {
+	my ($stack, $v, $samples, $d) = @_;
+	if ($splittid) {
+		if (@$stack == 0) {
+			# Last call, flush Tmp
+			while (my ($tid, $stack) = each %Lasts) {
+				flow($tid, $Lasts{$tid}->{stack}, [],
+				     $Lasts{$tid}->{etime}, $d);
+			}
+			return;
+		}
+		# Grab the tid if the option --tid was provided
+		my ($tid) = $stack->[1] =~ /^[^-]*-(?:\d*|\?)\/(\d*)$/;
+		if ($tid eq "") {
+			print STDERR "Missing TID in: $stack\n";
+			$ignored++;
+			return;
+		}
+		# Index this tid if it is encountered for the first time
+		unless (exists $Tids{$tid}) {
+			$Tids{$tid} = $tid_idx;
+			$tid_idx++;
+		}
+
+		if (exists $Lasts{$tid}) {
+			$last_stack = $Lasts{$tid}->{stack};
+		} else {
+			$last_stack = [];
+		}
+
+		flow($tid, $last_stack, $stack, $v, $d);
+
+		$Lasts{$tid}->{stack} = $stack;
+		$Lasts{$tid}->{etime} = $v + $samples;
+	} else {
+		flow(0, $last_stack, $stack, $v, $d);
+		$last_stack = $stack;
+	}
+}
 
 # reverse if needed
 foreach (<>) {
@@ -556,14 +598,12 @@ foreach (<>) {
 	}
 }
 
-my $tid_idx = 0;
-my $tid = 0;
-
-# process and merge frames
-
+# Sort (alphabetically) if required
 if ($sort) {
 	@Data = sort @Data;
 }
+
+# process and merge frames
 foreach (@Data) {
 	chomp;
 	# process: folded_stack count
@@ -589,23 +629,6 @@ foreach (@Data) {
 	# clean up SVG breaking characters:
 	$stack =~ tr/<>/()/;
 
-	# Grab the tid if the option --tid was provided
-	if ($splittid) {
-		my $stack2;
-		($stack, $tid, $stack2) =
-			$stack =~ (/^([^-]*)-?(?:[^\/]*)\/?([^; ]*)(.*)$/);
-		$stack .= $stack2;
-		if ($tid eq "") {
-			print STDERR "Missing TID in: $stack\n";
-			$ignored++;
-			next;
-		}
-		unless (exists $Tids{$tid}) {
-			$Tids{$tid} = $tid_idx;
-			$tid_idx++;
-		}
-	}
-
 	# for chain graphs, annotate waker frames with "_[w]", for later
 	# coloring. This is a hack, but has a precedent ("_[k]" from perf).
 	if ($colors eq "chain") {
@@ -621,16 +644,16 @@ foreach (@Data) {
 		$stack .= join ";-;", @parts;
 	}
 
-	# merge frames and populate %Node:
-	($last_tid, $last) = flow($last_tid, $last, $tid, [ '', split ";", $stack ], $time, $delta);
-
 	if (defined $samples2) {
-		$time += $samples2;
-	} else {
-		$time += $samples;
+		$samples = $samples2;
 	}
+
+	# merge frames and populate %Node:
+	wrap_flow([ '', split ";", $stack ], $time, $samples, $delta);
+
+	$time += $samples;
 }
-flow($last_tid, $last, 0, [], $time, $delta);
+wrap_flow([], $time, undef);
 
 warn "Ignored $ignored lines with invalid format\n" if $ignored;
 unless ($time) {
@@ -658,10 +681,6 @@ my $minwidth_time = $minwidth / $widthpertime;
 # prune blocks that are too narrow and determine max depth
 while (my ($id, $node) = each %Node) {
 	my ($tid, $func, $depth, $etime) = split ";", $id;
-	unless (exists $Tids{$tid}) {
-		$Tids{$tid} = $tid_idx;
-		$tid_idx++;
-	}
 	$tid = $Tids{$tid};
 	my $stime = $node->{stime};
 	die "missing start for $id" if not defined $stime;
